@@ -1,6 +1,8 @@
 # Credentials and secrets
 credentials.env
 slack.env
+container.env
+*Private*
 
 # Python
 __pycache__/

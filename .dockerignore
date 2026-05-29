@@ -1,0 +1,12 @@
+credentials.env
+slack.env
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.claude/
+.mcp.json
+debug/
+work/
+dist/
+*.log

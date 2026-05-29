@@ -7,7 +7,7 @@ Task:     45d9b78e-b691-3c77-9810-65029611cfe7  (open task, currently Bryan)
 New user: 2TpHXcgSokmg81JN6sl5m6               (shayes_rcg_dq_POC)
 """
 
-VERSION = "20260528"
+VERSION = "20260529"
 
 import json
 import requests

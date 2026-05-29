@@ -1,4 +1,4 @@
-VERSION = "20260528"
+VERSION = "20260529"
 
 import logging
 import os

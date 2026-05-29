@@ -1,15 +1,26 @@
 """
 Informatica session management for CDGC MCP Server.
 Handles login, JWT token generation, and per-API header factories.
+
+Credentials come from one of two sources (checked in order):
+  1. request_credentials context var — set per-request from X-IDMC-Token header
+  2. credentials.env file on disk — used for local development
 """
-VERSION = "20260528"
+VERSION = "20260529"
 
 import os
 import requests
+from contextvars import ContextVar
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 from dotenv import load_dotenv
+
+# Set this per-request before calling get_session() in containerised mode.
+# Value should be a dict with keys: pod, username, password
+request_credentials: ContextVar[Optional[dict]] = ContextVar(
+    "request_credentials", default=None
+)
 
 
 class AuthError(Exception):
@@ -20,25 +31,15 @@ class InformaticaSession:
     """
     Manages authentication state for all Informatica APIs.
 
-    URL layout derived from 'pod' in credentials.env:
+    URL layout derived from 'pod':
       Login URL:    https://{pod}.informaticacloud.com
       CDGC API URL: https://cdgc-api.{pod}.informaticacloud.com
       IDMC API URL: returned as serverUrl from the login response
     """
 
-    def __init__(self, credentials_path: Optional[str] = None):
-        path = credentials_path or str(Path(__file__).parent / "credentials.env")
-        load_dotenv(path, override=True)
-
-        pod = os.environ.get("pod", "").strip()
-        self.username = os.environ.get("username", "").strip()
-        self.password = os.environ.get("password", "").strip()
-
-        if not pod or not self.username or not self.password:
-            raise AuthError(
-                "credentials.env must contain: pod, username, password"
-            )
-
+    def __init__(self, pod: str, username: str, password: str):
+        self.username = username
+        self.password = password
         self.login_url = f"https://{pod}.informaticacloud.com"
         self.cdgc_api_url = f"https://cdgc-api.{pod}.informaticacloud.com"
 
@@ -196,13 +197,37 @@ class InformaticaSession:
 
 
 # ---------------------------------------------------------------------------
-# Module-level singleton — shared across all tool calls within one server run
+# Session factory
 # ---------------------------------------------------------------------------
-_session: Optional[InformaticaSession] = None
+_local_session: Optional[InformaticaSession] = None
 
 
 def get_session() -> InformaticaSession:
-    global _session
-    if _session is None:
-        _session = InformaticaSession()
-    return _session
+    """Return a session for the current request.
+
+    In container mode the credentials come from the request_credentials
+    context var (set from the X-IDMC-Token header).  In local mode they
+    come from credentials.env on disk.
+    """
+    creds = request_credentials.get()
+    if creds:
+        # Container / token mode: one session per request (no caching —
+        # different callers have different credentials).
+        return InformaticaSession(
+            pod=creds["pod"],
+            username=creds["username"],
+            password=creds["password"],
+        )
+
+    # Local mode: lazy singleton backed by credentials.env
+    global _local_session
+    if _local_session is None:
+        path = str(Path(__file__).parent / "credentials.env")
+        load_dotenv(path, override=True)
+        pod = os.environ.get("pod", "").strip()
+        username = os.environ.get("username", "").strip()
+        password = os.environ.get("password", "").strip()
+        if not pod or not username or not password:
+            raise AuthError("credentials.env must contain: pod, username, password")
+        _local_session = InformaticaSession(pod=pod, username=username, password=password)
+    return _local_session

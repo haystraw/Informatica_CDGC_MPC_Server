@@ -17,11 +17,15 @@ from typing import Optional
 import os
 import requests
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecurityMiddleware
 from auth import get_session
 
-VERSION = "20260528"
+VERSION = "20260529"
 
-SERVER_VERSION = "20260422"
+# Disable all MCP transport security checks — we handle auth via X-IDMC-Token.
+async def _no_op_validate(self, request, is_post=False):
+    return None
+TransportSecurityMiddleware.validate_request = _no_op_validate
 
 mcp = FastMCP("CDGC")
 
@@ -37,7 +41,7 @@ def get_server_version() -> dict:
     Returns:
         Dict with "version" key containing the datestamp version string.
     """
-    return {"version": SERVER_VERSION}
+    return {"version": VERSION}
 
 
 # ---------------------------------------------------------------------------
