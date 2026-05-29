@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>IDMC AI Assistant</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #f0f2f5;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ── Token gate overlay ─────────────────────────────────────── */
+    #gate {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,.5);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 100;
+    }
+    #gate.hidden { display: none; }
+    .gate-card {
+      background: white;
+      border-radius: 12px;
+      padding: 36px 40px;
+      width: 480px;
+      max-width: 95vw;
+      box-shadow: 0 20px 60px rgba(0,0,0,.2);
+    }
+    .gate-card h2 { font-size: 1.3rem; margin-bottom: 8px; color: #1a56a0; }
+    .gate-card p  { font-size: 0.88rem; color: #666; margin-bottom: 20px; line-height: 1.5; }
+    .gate-card textarea {
+      width: 100%; height: 90px;
+      padding: 10px 12px;
+      border: 1px solid #ccc; border-radius: 6px;
+      font-family: monospace; font-size: 0.82rem;
+      resize: none;
+    }
+    .gate-card textarea:focus { outline: none; border-color: #1a56a0; }
+    .gate-error { color: #c0392b; font-size: 0.85rem; margin-top: 8px; min-height: 20px; }
+    .gate-actions { display: flex; gap: 10px; margin-top: 16px; align-items: center; }
+    .gate-actions a { font-size: 0.82rem; color: #1a56a0; text-decoration: none; }
+    .gate-actions a:hover { text-decoration: underline; }
+
+    /* ── Header ─────────────────────────────────────────────────── */
+    header {
+      background: #1a56a0;
+      color: white;
+      padding: 14px 20px;
+      display: flex; align-items: center; justify-content: space-between;
+      flex-shrink: 0;
+    }
+    header h1 { font-size: 1.1rem; font-weight: 600; }
+    header .env-badge {
+      font-size: 0.78rem;
+      background: rgba(255,255,255,.2);
+      padding: 3px 10px;
+      border-radius: 20px;
+      max-width: 400px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    #btn-logout {
+      background: rgba(255,255,255,.15);
+      border: 1px solid rgba(255,255,255,.3);
+      color: white;
+      padding: 5px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.82rem;
+    }
+    #btn-logout:hover { background: rgba(255,255,255,.25); }
+
+    /* ── Chat area ───────────────────────────────────────────────── */
+    #chat {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .msg {
+      max-width: 80%;
+      padding: 12px 16px;
+      border-radius: 12px;
+      line-height: 1.55;
+      font-size: 0.93rem;
+      word-break: break-word;
+    }
+    .msg.assistant table {
+      border-collapse: collapse;
+      margin: 8px 0;
+      font-size: 0.88rem;
+      width: 100%;
+    }
+    .msg.assistant th, .msg.assistant td {
+      border: 1px solid #ddd;
+      padding: 6px 10px;
+      text-align: left;
+    }
+    .msg.assistant th { background: #f0f4f8; font-weight: 600; }
+    .msg.assistant tr:nth-child(even) { background: #fafafa; }
+    .msg.assistant ul, .msg.assistant ol { padding-left: 20px; margin: 6px 0; }
+    .msg.assistant li { margin: 3px 0; }
+    .msg.assistant strong { font-weight: 600; }
+    .msg.assistant p { margin: 6px 0; }
+
+    /* ── Trace ───────────────────────────────────────────────────── */
+    .trace-toggle {
+      display: inline-flex; align-items: center; gap: 5px;
+      margin-top: 8px; cursor: pointer;
+      font-size: 0.75rem; color: #999;
+      user-select: none;
+    }
+    .trace-toggle:hover { color: #666; }
+    .trace-toggle svg { width: 12px; height: 12px; transition: transform .2s; }
+    .trace-toggle.open svg { transform: rotate(90deg); }
+    .trace-body {
+      display: none; margin-top: 6px;
+      background: #f7f8fa; border: 1px solid #e4e6ea;
+      border-radius: 6px; padding: 10px 12px;
+      font-size: 0.78rem; font-family: monospace;
+      color: #555; line-height: 1.5;
+      max-height: 300px; overflow-y: auto;
+    }
+    .trace-body.open { display: block; }
+    .trace-tool { margin: 4px 0; }
+    .trace-tool .tool-name { color: #1a56a0; font-weight: bold; }
+    .trace-tool .tool-ok { color: #27ae60; }
+    .trace-tool .tool-err { color: #c0392b; }
+    .msg.user {
+      align-self: flex-end;
+      background: #1a56a0;
+      color: white;
+      border-bottom-right-radius: 3px;
+    }
+    .msg.assistant {
+      align-self: flex-start;
+      background: white;
+      color: #222;
+      border-bottom-left-radius: 3px;
+      box-shadow: 0 1px 3px rgba(0,0,0,.1);
+    }
+    .msg.thinking {
+      align-self: flex-start;
+      background: white;
+      color: #999;
+      font-style: italic;
+      border-bottom-left-radius: 3px;
+      box-shadow: 0 1px 3px rgba(0,0,0,.08);
+    }
+    .msg.error {
+      align-self: flex-start;
+      background: #fff0f0;
+      color: #c0392b;
+      border: 1px solid #f5c6c6;
+      border-bottom-left-radius: 3px;
+    }
+
+    /* ── Input bar ───────────────────────────────────────────────── */
+    #input-bar {
+      background: white;
+      border-top: 1px solid #e0e0e0;
+      padding: 14px 20px;
+      display: flex;
+      gap: 10px;
+      flex-shrink: 0;
+    }
+    #input-bar textarea {
+      flex: 1;
+      padding: 10px 14px;
+      border: 1px solid #ccc;
+      border-radius: 8px;
+      font-size: 0.95rem;
+      font-family: inherit;
+      resize: none;
+      height: 44px;
+      max-height: 140px;
+      overflow-y: auto;
+      line-height: 1.4;
+    }
+    #input-bar textarea:focus { outline: none; border-color: #1a56a0; }
+    #btn-send {
+      background: #1a56a0;
+      color: white;
+      border: none;
+      padding: 0 20px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 1rem;
+      font-weight: 500;
+      flex-shrink: 0;
+    }
+    #btn-send:disabled { background: #aaa; cursor: default; }
+    #btn-send:hover:not(:disabled) { background: #154480; }
+
+    button.primary {
+      background: #1a56a0; color: white; border: none;
+      padding: 10px 24px; border-radius: 6px;
+      font-size: 0.95rem; cursor: pointer; font-weight: 500;
+    }
+    button.primary:hover { background: #154480; }
+  </style>
+</head>
+<body>
+
+<!-- ── Token gate ─────────────────────────────────────────────── -->
+<div id="gate">
+  <div class="gate-card">
+    <h2>IDMC AI Assistant</h2>
+    <p>Paste your <strong>X-IDMC-Token</strong> to connect to your Informatica environment.
+       Don't have one? <a id="enroll-link" href="#" target="_blank">Enroll here →</a></p>
+    <textarea id="token-input" placeholder="Paste your token here…" spellcheck="false"></textarea>
+    <div class="gate-error" id="gate-error"></div>
+    <div class="gate-actions">
+      <button class="primary" onclick="submitToken()">Connect</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Main UI ────────────────────────────────────────────────── -->
+<header>
+  <h1>IDMC AI Assistant</h1>
+  <span class="env-badge" id="env-badge">Connected</span>
+  <button id="btn-logout" onclick="logout()">Change Token</button>
+</header>
+
+<div id="chat"></div>
+
+<div id="input-bar">
+  <textarea id="user-input" placeholder="Ask about your data catalog…" rows="1"
+            onkeydown="handleKey(event)" oninput="autoResize(this)"></textarea>
+  <button id="btn-send" onclick="sendMessage()">Send</button>
+</div>
+
+<script>
+  const MCP_ENROLL_URL = window.location.origin.replace(/:\d+$/, '') +
+    (window.location.port ? ':8000' : '') + '/enroll';
+
+  let token = null;
+  let history = [];
+
+  // ── Cookie helpers ────────────────────────────────────────────
+  function setCookie(name, value, days) {
+    const exp = new Date(Date.now() + days * 864e5).toUTCString();
+    document.cookie = `${name}=${encodeURIComponent(value)};expires=${exp};path=/;SameSite=Lax`;
+  }
+  function getCookie(name) {
+    const m = document.cookie.match('(?:^|; )' + name + '=([^;]*)');
+    return m ? decodeURIComponent(m[1]) : null;
+  }
+  function deleteCookie(name) {
+    document.cookie = `${name}=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/`;
+  }
+
+  function setEnvBadge(orgName) {
+    const badge = document.getElementById('env-badge');
+    badge.textContent = orgName || 'Connected';
+    badge.title = orgName;
+  }
+
+  // ── Init ──────────────────────────────────────────────────────
+  window.addEventListener('DOMContentLoaded', () => {
+    document.getElementById('enroll-link').href =
+      window.location.origin + '/enroll';
+
+    const saved = getCookie('idmc_token');
+    const savedOrg = getCookie('idmc_org');
+    if (saved) {
+      token = saved;
+      setEnvBadge(savedOrg);
+      document.getElementById('gate').classList.add('hidden');
+      addMessage('assistant', `Connected to <strong>${savedOrg || 'your IDMC catalog'}</strong>. Ask me anything!`);
+    }
+  });
+
+  // ── Token gate ────────────────────────────────────────────────
+  async function submitToken() {
+    const val = document.getElementById('token-input').value.trim();
+    if (!val) {
+      document.getElementById('gate-error').textContent = 'Please paste your token.';
+      return;
+    }
+
+    document.getElementById('gate-error').textContent = 'Connecting…';
+
+    try {
+      const resp = await fetch('/token-info', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({token: val}),
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        document.getElementById('gate-error').textContent = data.error || 'Invalid token.';
+        return;
+      }
+
+      token = val;
+      setCookie('idmc_token', token, 30);
+      setCookie('idmc_org', data.org_name || '', 30);
+      setCookie('idmc_user', data.username || '', 30);
+      setCookie('idmc_pod', data.pod || '', 30);
+
+      setEnvBadge(data.org_name);
+      document.getElementById('gate').classList.add('hidden');
+      document.getElementById('gate-error').textContent = '';
+      addMessage('assistant', `Connected to <strong>${data.org_name || data.pod}</strong>. Ask me anything about your IDMC catalog!`);
+    } catch (err) {
+      document.getElementById('gate-error').textContent = 'Network error: ' + err.message;
+    }
+  }
+
+  function logout() {
+    deleteCookie('idmc_token');
+    deleteCookie('idmc_org');
+    deleteCookie('idmc_user');
+    deleteCookie('idmc_pod');
+    token = null;
+    history = [];
+    document.getElementById('chat').innerHTML = '';
+    document.getElementById('token-input').value = '';
+    document.getElementById('env-badge').textContent = 'Connected';
+    document.getElementById('gate').classList.remove('hidden');
+  }
+
+  // ── Chat ──────────────────────────────────────────────────────
+  function addMessage(role, text) {
+    const div = document.createElement('div');
+    div.className = 'msg ' + role;
+    if (role === 'assistant') {
+      div.innerHTML = text;
+    } else {
+      div.textContent = text;
+    }
+    document.getElementById('chat').appendChild(div);
+    div.scrollIntoView({ behavior: 'smooth' });
+    return div;
+  }
+
+  function addTrace(msgDiv, trace) {
+    const toolCalls = trace.filter(t => t.tool);
+    if (toolCalls.length === 0) return;
+
+    const wrapper = document.createElement('div');
+    wrapper.style.cssText = 'margin-top:10px; border-top: 1px solid #eee; padding-top:6px;';
+
+    const toggle = document.createElement('div');
+    toggle.className = 'trace-toggle';
+    toggle.innerHTML = `<svg viewBox="0 0 6 10" fill="none" stroke="currentColor" stroke-width="1.5">
+      <polyline points="1,1 5,5 1,9"/></svg> ${toolCalls.length} tool call${toolCalls.length > 1 ? 's' : ''}`;
+
+    const body = document.createElement('div');
+    body.className = 'trace-body';
+
+    toolCalls.forEach(t => {
+      const row = document.createElement('div');
+      row.className = 'trace-tool';
+      const args = JSON.stringify(t.input || {}, null, 2);
+
+      if (t.status === 'error') {
+        row.innerHTML = `<span class="tool-name">${t.tool}</span> <span class="tool-err">✗ ${t.error || 'error'}</span>`;
+      } else {
+        const result = t.result || '';
+        row.innerHTML = `<span class="tool-name tool-ok">✓ ${t.tool}</span>
+          <details style="margin-top:3px; margin-left:12px;">
+            <summary style="cursor:pointer; color:#888; font-size:0.75rem;">input</summary>
+            <pre style="margin:4px 0; white-space:pre-wrap; font-size:0.75rem;">${escHtml(args)}</pre>
+          </details>
+          <details style="margin-top:2px; margin-left:12px;">
+            <summary style="cursor:pointer; color:#888; font-size:0.75rem;">result (${result.length} chars)</summary>
+            <pre style="margin:4px 0; white-space:pre-wrap; font-size:0.75rem; max-height:200px; overflow-y:auto;">${escHtml(result)}</pre>
+          </details>`;
+      }
+      body.appendChild(row);
+    });
+
+    toggle.addEventListener('click', () => {
+      toggle.classList.toggle('open');
+      body.classList.toggle('open');
+    });
+
+    wrapper.appendChild(toggle);
+    wrapper.appendChild(body);
+    msgDiv.appendChild(wrapper);
+  }
+
+  function escHtml(str) {
+    return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  async function sendMessage() {
+    const input = document.getElementById('user-input');
+    const text = input.value.trim();
+    if (!text || !token) return;
+
+    input.value = '';
+    input.style.height = '44px';
+    document.getElementById('btn-send').disabled = true;
+
+    addMessage('user', text);
+    const thinking = addMessage('thinking', 'Thinking…');
+
+    history.push({ role: 'user', text });
+
+    try {
+      const pod = getCookie('idmc_pod') || '';
+      const resp = await fetch('/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-IDMC-Token': token,
+        },
+        body: JSON.stringify({ message: text, history: history.slice(0, -1), pod }),
+      });
+
+      const data = await resp.json();
+      thinking.remove();
+
+      if (!resp.ok || data.error) {
+        if (resp.status === 401) { logout(); return; }
+        addMessage('error', 'Error: ' + (data.error || resp.statusText));
+        history.pop();
+      } else {
+        const msgDiv = addMessage('assistant', data.response);
+        if (data.trace && data.trace.length > 0) {
+          addTrace(msgDiv, data.trace);
+        }
+        history.push({ role: 'assistant', text: data.response });
+        if (history.length > 20) history = history.slice(-20);
+      }
+    } catch (err) {
+      thinking.remove();
+      addMessage('error', 'Network error: ' + err.message);
+      history.pop();
+    }
+
+    document.getElementById('btn-send').disabled = false;
+    input.focus();
+  }
+
+  function handleKey(e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  }
+
+  function autoResize(el) {
+    el.style.height = '44px';
+    el.style.height = Math.min(el.scrollHeight, 140) + 'px';
+  }
+</script>
+</body>
+</html>
