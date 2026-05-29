@@ -1,0 +1,31 @@
+# Credentials and secrets
+credentials.env
+slack.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# Claude
+.claude/
+.mcp.json
+
+# Debug artifacts
+debug/
+
+# Scratch/work files
+work/
