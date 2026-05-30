@@ -4,7 +4,7 @@ MCP client for the IDMC MCP Server.
 Opens one session per chat request and reuses it for all tool calls,
 avoiding the TaskGroup errors that come from rapid reconnects.
 """
-VERSION = "20260529"
+VERSION = "20260529.1"
 
 import logging
 from contextlib import asynccontextmanager
@@ -14,6 +14,13 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
 logger = logging.getLogger("ai_assistant.mcp")
+
+# Module-level tool cache — keyed by server_url.
+# Tools are the same for all users on the same server, so we cache globally.
+# TTL of 5 minutes to pick up any server-side tool changes.
+import time
+_tool_cache: dict = {}   # server_url -> {"tools": list, "expires": float}
+TOOL_CACHE_TTL = 300     # seconds
 
 
 @asynccontextmanager
@@ -40,22 +47,27 @@ class McpClient:
         if self._session:
             result = await self._session.list_tools()
             return result.tools
-        # Fallback: open a one-off session
         async with mcp_session(self.server_url, self.token) as session:
             result = await session.list_tools()
             return result.tools
 
     async def list_tools(self) -> list[dict]:
-        tools = await self._get_tools()
+        cached = _tool_cache.get(self.server_url)
+        if cached and time.monotonic() < cached["expires"]:
+            logger.debug("Tool cache hit (%d tools)", len(cached["tools"]))
+            return cached["tools"]
+
+        raw = await self._get_tools()
         result = [
             {
                 "name": t.name,
                 "description": t.description or "",
                 "inputSchema": dict(t.inputSchema) if t.inputSchema else {},
             }
-            for t in tools
+            for t in raw
         ]
-        logger.info("Loaded %d MCP tools", len(result))
+        _tool_cache[self.server_url] = {"tools": result, "expires": time.monotonic() + TOOL_CACHE_TTL}
+        logger.info("Loaded %d MCP tools (cached for %ds)", len(result), TOOL_CACHE_TTL)
         return result
 
     async def call_tool(self, name: str, arguments: dict) -> Any:

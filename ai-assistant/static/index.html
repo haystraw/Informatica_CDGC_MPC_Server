@@ -216,7 +216,9 @@
   <div class="gate-card">
     <h2>IDMC AI Assistant</h2>
     <p>Paste your <strong>X-IDMC-Token</strong> to connect to your Informatica environment.
-       Don't have one? <a id="enroll-link" href="#" target="_blank">Enroll here →</a></p>
+       Don't have one? <a href="https://idmc-mcp-server-668103879510.us-central1.run.app/enroll"
+         target="_blank"
+         title="Enrollment requires a password. Please reach out to Scott Hayes to obtain it.">Enroll here →</a></p>
     <textarea id="token-input" placeholder="Paste your token here…" spellcheck="false"></textarea>
     <div class="gate-error" id="gate-error"></div>
     <div class="gate-actions">
@@ -241,13 +243,12 @@
 </div>
 
 <script>
-  const MCP_ENROLL_URL = window.location.origin.replace(/:\d+$/, '') +
-    (window.location.port ? ':8000' : '') + '/enroll';
-
-  let token = null;
+  // Display metadata stored in JS-readable cookies (org name, pod)
+  // The actual token is stored server-side in an httpOnly cookie — JS never sees it.
   let history = [];
+  let currentPod = '';
 
-  // ── Cookie helpers ────────────────────────────────────────────
+  // ── Cookie helpers (JS-readable cookies only) ─────────────────
   function setCookie(name, value, days) {
     const exp = new Date(Date.now() + days * 864e5).toUTCString();
     document.cookie = `${name}=${encodeURIComponent(value)};expires=${exp};path=/;SameSite=Lax`;
@@ -266,18 +267,22 @@
     badge.title = orgName;
   }
 
-  // ── Init ──────────────────────────────────────────────────────
-  window.addEventListener('DOMContentLoaded', () => {
-    document.getElementById('enroll-link').href =
-      window.location.origin + '/enroll';
-
-    const saved = getCookie('idmc_token');
+  // ── Init — check if server-side session exists ─────────────────
+  window.addEventListener('DOMContentLoaded', async () => {
     const savedOrg = getCookie('idmc_org');
-    if (saved) {
-      token = saved;
-      setEnvBadge(savedOrg);
-      document.getElementById('gate').classList.add('hidden');
-      addMessage('assistant', `Connected to <strong>${savedOrg || 'your IDMC catalog'}</strong>. Ask me anything!`);
+    const savedPod = getCookie('idmc_pod');
+    if (savedOrg) {
+      // Verify the httpOnly session cookie is still valid by probing /chat
+      try {
+        const probe = await fetch('/health');
+        // If org cookie exists, assume session is live (server will reject on first chat if not)
+        currentPod = savedPod || '';
+        setEnvBadge(savedOrg);
+        document.getElementById('gate').classList.add('hidden');
+        addMessage('assistant', `Connected to <strong>${savedOrg}</strong>. Ask me anything!`);
+      } catch (e) {
+        // Network error — show gate
+      }
     }
   });
 
@@ -292,7 +297,7 @@
     document.getElementById('gate-error').textContent = 'Connecting…';
 
     try {
-      const resp = await fetch('/token-info', {
+      const resp = await fetch('/connect', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({token: val}),
@@ -303,27 +308,27 @@
         return;
       }
 
-      token = val;
-      setCookie('idmc_token', token, 30);
+      // Store only display metadata in JS-readable cookies
+      // The encrypted session token is set server-side as httpOnly
       setCookie('idmc_org', data.org_name || '', 30);
-      setCookie('idmc_user', data.username || '', 30);
       setCookie('idmc_pod', data.pod || '', 30);
+      currentPod = data.pod || '';
 
       setEnvBadge(data.org_name);
       document.getElementById('gate').classList.add('hidden');
       document.getElementById('gate-error').textContent = '';
+      document.getElementById('token-input').value = '';
       addMessage('assistant', `Connected to <strong>${data.org_name || data.pod}</strong>. Ask me anything about your IDMC catalog!`);
     } catch (err) {
       document.getElementById('gate-error').textContent = 'Network error: ' + err.message;
     }
   }
 
-  function logout() {
-    deleteCookie('idmc_token');
+  async function logout() {
+    await fetch('/disconnect', {method: 'POST'});
     deleteCookie('idmc_org');
-    deleteCookie('idmc_user');
     deleteCookie('idmc_pod');
-    token = null;
+    currentPod = '';
     history = [];
     document.getElementById('chat').innerHTML = '';
     document.getElementById('token-input').value = '';
@@ -399,7 +404,7 @@
   async function sendMessage() {
     const input = document.getElementById('user-input');
     const text = input.value.trim();
-    if (!text || !token) return;
+    if (!text) return;
 
     input.value = '';
     input.style.height = '44px';
@@ -411,21 +416,17 @@
     history.push({ role: 'user', text });
 
     try {
-      const pod = getCookie('idmc_pod') || '';
       const resp = await fetch('/chat', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-IDMC-Token': token,
-        },
-        body: JSON.stringify({ message: text, history: history.slice(0, -1), pod }),
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ message: text, history: history.slice(0, -1), pod: currentPod }),
       });
 
       const data = await resp.json();
       thinking.remove();
 
       if (!resp.ok || data.error) {
-        if (resp.status === 401) { logout(); return; }
+        if (resp.status === 401) { await logout(); return; }
         addMessage('error', 'Error: ' + (data.error || resp.statusText));
         history.pop();
       } else {

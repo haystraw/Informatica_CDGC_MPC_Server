@@ -20,7 +20,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecurityMiddleware
 from auth import get_session
 
-VERSION = "20260529"
+VERSION = "20260529.1"
 
 # Disable all MCP transport security checks — we handle auth via X-IDMC-Token.
 async def _no_op_validate(self, request, is_post=False):
@@ -1544,6 +1544,471 @@ def get_runtime_environment_by_name(runtime_environment_name: str) -> dict:
     resp = requests.get(
         f"{s.base_api_url}/api/v2/runtimeEnvironmentname/{runtime_environment_name}",
         headers=s.idmc_headers(),
+        timeout=30,
+    )
+    return _r(resp)
+
+
+# ===========================================================================
+# DATA PROFILING APIs
+# Base URL derived from login: https://{pod}-dqprofile.dm-{region}.informaticacloud.com
+# ===========================================================================
+
+@mcp.tool()
+def list_profiles(
+    project_name: Optional[str] = None,
+    folder_name: Optional[str] = None,
+    name: Optional[str] = None,
+) -> dict:
+    """List data profiles in the org.
+
+    Args:
+        project_name: Filter by FRS project name.
+        folder_name: Filter by FRS folder name.
+        name: Filter by profile name (exact match).
+
+    Returns:
+        List of profiles with IDs, names, connection info, and sampling options.
+    """
+    s = get_session()
+    params = {}
+    if project_name:
+        params["frsProjectName"] = project_name
+    if folder_name:
+        params["frsFolderName"] = folder_name
+    if name:
+        params["name"] = name
+        params["exactMatch"] = "true"
+
+    resp = requests.get(
+        f"{s.profiling_url}/profiling-service/api/v1/profile",
+        params=params,
+        headers=s.profiling_headers(),
+        timeout=30,
+    )
+    return _r(resp)
+
+
+@mcp.tool()
+def get_profile(profile_id: str) -> dict:
+    """Get the full definition of a data profile by ID.
+
+    Args:
+        profile_id: Profile UUID (from list_profiles).
+
+    Returns:
+        Full profile definition including source, fields, sampling options, and runtime config.
+    """
+    s = get_session()
+    resp = requests.get(
+        f"{s.profiling_url}/profiling-service/api/v1/profile/{profile_id}",
+        headers=s.profiling_headers(),
+        timeout=30,
+    )
+    return _r(resp)
+
+
+@mcp.tool()
+def run_profile(profile_id: str) -> dict:
+    """Execute a data profile run.
+
+    Args:
+        profile_id: Profile UUID (from list_profiles).
+
+    Returns:
+        Dict with profileRunId and profileJobId — use get_profile_job_status to track progress.
+    """
+    s = get_session()
+    resp = requests.post(
+        f"{s.profiling_url}/profiling-service/api/v1/profile/{profile_id}/execute",
+        headers=s.profiling_headers(),
+        timeout=30,
+    )
+    return _r(resp)
+
+
+@mcp.tool()
+def get_profile_job_status(job_id: str) -> dict:
+    """Get the status and details of a profiling job.
+
+    Args:
+        job_id: Job ID returned by run_profile (profileJobId).
+
+    Returns:
+        Job status (COMPLETED, RUNNING, FAILED), start/end times, and step details.
+    """
+    s = get_session()
+    resp = requests.get(
+        f"{s.profiling_url}/profiling-service/api/v1/job/{job_id}",
+        headers=s.profiling_headers(),
+        timeout=30,
+    )
+    return _r(resp)
+
+
+@mcp.tool()
+def list_profile_runs(
+    limit: int = 10,
+) -> dict:
+    """List recent profile run details across all profiles.
+
+    Args:
+        limit: Number of runs to return (default 10).
+
+    Returns:
+        List of recent profile runs with IDs, status, and timing.
+    """
+    s = get_session()
+    resp = requests.get(
+        f"{s.profiling_url}/profiling-service/api/v1/runDetail/topNrun",
+        params={"limit": limit},
+        headers=s.profiling_headers(),
+        timeout=30,
+    )
+    return _r(resp)
+
+
+@mcp.tool()
+def get_profile_columns(profile_id: str) -> dict:
+    """List all profiled columns in a profile with their summary statistics.
+
+    Args:
+        profile_id: Profile UUID (from list_profiles).
+
+    Returns:
+        List of columns with null %, distinct count, min/max values, and data type info.
+    """
+    s = get_session()
+    resp = requests.get(
+        f"{s.profiling_url}/metric-store/api/v1/odata/Profiles('{profile_id}')/Columns",
+        headers=s.profiling_headers(),
+        timeout=30,
+    )
+    return _r(resp)
+
+
+@mcp.tool()
+def get_column_profile(
+    profile_id: str,
+    column_id: str,
+    include_patterns: bool = False,
+    include_value_frequencies: bool = False,
+    include_data_types: bool = False,
+) -> dict:
+    """Get detailed profiling results for a specific column.
+
+    Args:
+        profile_id: Profile UUID (from list_profiles).
+        column_id: Column key/ID (from get_profile_columns).
+        include_patterns: Also fetch inferred patterns (regex-like).
+        include_value_frequencies: Also fetch value frequency distribution.
+        include_data_types: Also fetch inferred data types.
+
+    Returns:
+        Column statistics and optionally patterns, value frequencies, or data types.
+    """
+    s = get_session()
+    base = f"{s.profiling_url}/metric-store/api/v1/odata/Profiles('{profile_id}')/Columns('{column_id}')"
+
+    result: dict = {}
+
+    resp = requests.get(base, headers=s.profiling_headers(), timeout=30)
+    result["column"] = _r(resp)
+
+    if include_patterns:
+        resp = requests.get(f"{base}/Patterns", headers=s.profiling_headers(), timeout=30)
+        result["patterns"] = _r(resp)
+
+    if include_value_frequencies:
+        resp = requests.get(f"{base}/ValueFrequencies", headers=s.profiling_headers(), timeout=30)
+        result["value_frequencies"] = _r(resp)
+
+    if include_data_types:
+        resp = requests.get(f"{base}/DataTypes", headers=s.profiling_headers(), timeout=30)
+        result["data_types"] = _r(resp)
+
+    return result
+
+
+@mcp.tool()
+def get_profile_insights(profile_id: str) -> dict:
+    """Get CLAIRE AI insights for a completed profile.
+
+    CLAIRE insights include completeness checks, data anomalies, uniqueness,
+    and other AI-generated observations about the profiled data.
+
+    Args:
+        profile_id: Profile UUID (from list_profiles).
+
+    Returns:
+        List of insights with type, score, statement, and confirmation status.
+    """
+    s = get_session()
+    resp = requests.get(
+        f"{s.profiling_url}/metric-store/api/v1/Profiles('{profile_id}')/Insights",
+        headers=s.profiling_headers(),
+        timeout=30,
+    )
+    return _r(resp)
+
+
+# ===========================================================================
+# CDGC — SMART SEARCH TOOLS
+# These build the correct CDGC query syntax internally so the LLM doesn't
+# need to know the query language. Use these before falling back to
+# the raw search_assets tool.
+# ===========================================================================
+
+@mcp.tool()
+def find_technical_datasets(
+    resource_name: Optional[str] = None,
+    name_contains: Optional[str] = None,
+    classification: Optional[str] = None,
+    policy: Optional[str] = None,
+    size: int = 20,
+) -> dict:
+    """Find Technical Datasets (tables, views, files, schemas) in the catalog.
+
+    A Technical Dataset is the CDGC generic term for any structured data container:
+    Snowflake tables, Oracle views, S3 files, BigQuery datasets, etc.
+
+    Args:
+        resource_name: Filter by catalog source name (e.g. "NSEN Snowflake*", "Salesforce").
+                       Supports wildcards (*).
+        name_contains: Filter by dataset name containing this string.
+        classification: Filter by data classification name (e.g. "Email", "SSN").
+        policy: Filter by related policy name (e.g. "Personal Data", "HIPAA").
+        size: Number of results to return (default 20).
+
+    Returns:
+        List of matching Technical Datasets with IDs and names.
+    """
+    s = get_session()
+
+    parts = ["Technical Data Sets"]
+    if classification:
+        parts.append(f'related to Data Element related to Classification with Name \'{classification}\'')
+    if policy:
+        parts.append(f'related to Data Element related to assets related to Policy "{policy}"')
+    if resource_name:
+        parts.append(f'in resource "{resource_name}"')
+    if name_contains:
+        parts.append(f'with name *{name_contains}*')
+
+    query = " ".join(parts) if len(parts) > 1 else "Technical Data Sets"
+
+    resp = requests.post(
+        f"{s.cdgc_api_url}/data360/search/v1/assets",
+        params={"knowledgeQuery": query, "segments": "summary"},
+        json={"from": 0, "size": size},
+        headers=s.cdgc_headers(),
+        timeout=30,
+    )
+    return _r(resp)
+
+
+@mcp.tool()
+def find_data_elements(
+    resource_name: Optional[str] = None,
+    dataset_name: Optional[str] = None,
+    classification: Optional[str] = None,
+    business_term: Optional[str] = None,
+    policy: Optional[str] = None,
+    curation_status: Optional[str] = None,
+    critical_only: bool = False,
+    size: int = 20,
+) -> dict:
+    """Find Data Elements (columns, fields) in the catalog.
+
+    Args:
+        resource_name: Filter by catalog source/resource name (e.g. "NSEN*", "Salesforce").
+        dataset_name: Filter by parent table/dataset name.
+        classification: Filter by classification name (e.g. "Email", "Birth date").
+        business_term: Filter by related business term name.
+        policy: Filter by related policy name.
+        curation_status: Filter by curation status — one of:
+                         AUTO_ACCEPTED, ACCEPTED, REJECTED, NONE.
+        critical_only: If True, only return elements linked to Critical Data Elements.
+        size: Number of results to return (default 20).
+
+    Returns:
+        List of matching Data Elements with IDs, names, and parent info.
+    """
+    s = get_session()
+
+    if critical_only:
+        base = "Data Elements related to (business terms which are critical data element)"
+    else:
+        base = "Data Elements"
+
+    parts = [base]
+
+    if classification:
+        parts.append(f'related to Classification with Name \'{classification}\'')
+    if business_term:
+        parts.append(f'related to Business Term "{business_term}"')
+    if policy:
+        parts.append(f'related to assets related to Policy "{policy}"')
+    if curation_status:
+        parts.append(f'related with curation status {curation_status} to data classification')
+    if resource_name:
+        parts.append(f'in resource "{resource_name}"')
+    if dataset_name:
+        parts.append(f'related to technical dataset "{dataset_name}"')
+
+    query = " ".join(parts)
+
+    resp = requests.post(
+        f"{s.cdgc_api_url}/data360/search/v1/assets",
+        params={"knowledgeQuery": query, "segments": "summary"},
+        json={"from": 0, "size": size},
+        headers=s.cdgc_headers(),
+        timeout=30,
+    )
+    return _r(resp)
+
+
+@mcp.tool()
+def find_glossary_terms(
+    name_contains: Optional[str] = None,
+    domain: Optional[str] = None,
+    policy: Optional[str] = None,
+    critical_only: bool = False,
+    certified_only: bool = False,
+    size: int = 20,
+) -> dict:
+    """Find Business Glossary Terms (Business Terms, Domains, Metrics, Policies, etc.).
+
+    Args:
+        name_contains: Filter by term name containing this string.
+        domain: Filter by parent domain name.
+        policy: Filter by related policy name.
+        critical_only: If True, only return terms flagged as Critical Data Elements.
+        certified_only: If True, only return certified terms.
+        size: Number of results to return (default 20).
+
+    Returns:
+        List of matching glossary assets with IDs, names, and descriptions.
+    """
+    s = get_session()
+
+    if critical_only:
+        base = "business terms which are critical data element"
+    else:
+        base = "Glossary"
+
+    parts = [base]
+
+    if certified_only:
+        parts = ["all which are certified"]
+        if critical_only:
+            parts = ["business terms which are critical data element and certified"]
+
+    if policy:
+        parts.append(f'related to policies "{policy}"')
+    if domain:
+        parts.append(f'in domain "{domain}"')
+    if name_contains:
+        parts.append(f'with name *{name_contains}*')
+
+    query = " ".join(parts)
+
+    resp = requests.post(
+        f"{s.cdgc_api_url}/data360/search/v1/assets",
+        params={"knowledgeQuery": query, "segments": "summary"},
+        json={"from": 0, "size": size},
+        headers=s.cdgc_headers(),
+        timeout=30,
+    )
+    return _r(resp)
+
+
+@mcp.tool()
+def find_dq_rules(
+    resource_name: Optional[str] = None,
+    dataset_name: Optional[str] = None,
+    business_term: Optional[str] = None,
+    policy: Optional[str] = None,
+    unacceptable_only: bool = False,
+    size: int = 20,
+) -> dict:
+    """Find Data Quality Rules and Rule Occurrences in the catalog.
+
+    Args:
+        resource_name: Filter rules for data elements in this resource.
+        dataset_name: Filter rules for data elements in this table/dataset.
+        business_term: Filter rules related to this business term.
+        policy: Filter rules related to this policy.
+        unacceptable_only: If True, only return rules with unacceptable DQ scores.
+        size: Number of results to return (default 20).
+
+    Returns:
+        List of matching DQ rules with IDs, names, and scores.
+    """
+    s = get_session()
+
+    if unacceptable_only:
+        base = "(data element related to business terms which are critical data element) related to data quality rule occurrence with threshold result \"not acceptable\""
+    else:
+        base = "dq rule"
+
+    parts = [base]
+
+    if business_term:
+        parts.append(f'related to Data elements related to Business Term "{business_term}"')
+    elif resource_name:
+        parts.append(f'related to Data elements related to tables in resource "{resource_name}"')
+    elif dataset_name:
+        parts.append(f'related to Data elements related to (table {dataset_name})')
+    if policy:
+        parts.append(f'related to Data Element related to assets related to Policy "{policy}"')
+
+    query = " ".join(parts)
+
+    resp = requests.post(
+        f"{s.cdgc_api_url}/data360/search/v1/assets",
+        params={"knowledgeQuery": query, "segments": "summary"},
+        json={"from": 0, "size": size},
+        headers=s.cdgc_headers(),
+        timeout=30,
+    )
+    return _r(resp)
+
+
+@mcp.tool()
+def find_catalog_sources_by_type(
+    source_type: Optional[str] = None,
+    name_contains: Optional[str] = None,
+    size: int = 25,
+) -> dict:
+    """Find catalog sources, optionally filtered by technology type or name.
+
+    Args:
+        source_type: Technology type filter (e.g. "Snowflake", "Oracle", "Databricks",
+                     "Amazon S3", "Azure Data Factory", "BigQuery", "PowerBI").
+        name_contains: Filter by source name containing this string.
+        size: Number of results to return (default 25).
+
+    Returns:
+        List of matching catalog sources with IDs, names, and types.
+    """
+    s = get_session()
+
+    params: dict = {
+        "offset": 0,
+        "limit": size,
+        "sort": "name:ASC",
+        "custom": "false",
+    }
+    if source_type:
+        params["filter"] = f"type:EQ:{source_type}"
+    if name_contains:
+        params["filter"] = f"name:LIKE:{name_contains}"
+
+    resp = requests.get(
+        f"{s.cdgc_api_url}/data360/catalog-source-management/v1/catalogsources",
+        params=params,
+        headers=s.cdgc_headers(),
         timeout=30,
     )
     return _r(resp)

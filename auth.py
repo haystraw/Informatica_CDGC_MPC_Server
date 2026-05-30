@@ -6,7 +6,7 @@ Credentials come from one of two sources (checked in order):
   1. request_credentials context var — set per-request from X-IDMC-Token header
   2. credentials.env file on disk — used for local development
 """
-VERSION = "20260529"
+VERSION = "20260529.1"
 
 import os
 import requests
@@ -48,6 +48,7 @@ class InformaticaSession:
         self._base_api_url: Optional[str] = None   # IDMC serverUrl (from login)
         self._jwt_token: Optional[str] = None
         self._token_expiry: Optional[datetime] = None
+        self._profiling_url: Optional[str] = None  # derived from serverUrl after login
 
     # ------------------------------------------------------------------
     # Login / token lifecycle
@@ -71,6 +72,15 @@ class InformaticaSession:
 
         if not self._session_id or not self._org_id:
             raise AuthError("Login response missing icSessionId or orgUuid")
+
+        # Derive profiling URL: https://usw3.dm-us.informaticacloud.com/saas
+        # → https://usw3-dqprofile.dm-us.informaticacloud.com
+        if self._base_api_url:
+            host = self._base_api_url.replace("https://", "").split("/")[0]
+            # host is like "usw3.dm-us.informaticacloud.com"
+            parts = host.split(".", 1)  # ["usw3", "dm-us.informaticacloud.com"]
+            if len(parts) == 2:
+                self._profiling_url = f"https://{parts[0]}-dqprofile.{parts[1]}"
 
     def _generate_jwt(self) -> None:
         """Exchange session cookie for a JWT access token (valid ~30 min)."""
@@ -138,6 +148,15 @@ class InformaticaSession:
             self.login()
         return self._base_api_url
 
+    @property
+    def profiling_url(self) -> str:
+        """Base URL for Data Profiling APIs.
+        Derived from serverUrl: https://usw3.dm-us.../saas → https://usw3-dqprofile.dm-us...
+        """
+        if not self._profiling_url:
+            self.login()
+        return self._profiling_url
+
     # ------------------------------------------------------------------
     # Header factories (one per API family)
     # ------------------------------------------------------------------
@@ -192,6 +211,14 @@ class InformaticaSession:
             "Content-Type": "application/json",
             "Accept": "application/json",
             "INFA-SESSION-ID": self.session_id,
+            "IDS-SESSION-ID": self.session_id,
+        }
+
+    def profiling_headers(self) -> dict:
+        """Headers for Data Profiling and Metric Store APIs."""
+        return {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
             "IDS-SESSION-ID": self.session_id,
         }
 

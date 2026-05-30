@@ -7,12 +7,14 @@ Supports two backends, selected by environment variables:
 
 Claude is used when both ANTHROPIC_API_KEY and ANTHROPIC_BASE_URL are set.
 """
-VERSION = "20260529"
+VERSION = "20260529.1"
 
 import json
 import logging
 import os
 from typing import Any
+
+import anthropic
 
 from mcp_client import McpClient
 
@@ -83,10 +85,11 @@ async def _chat_claude(user_message: str, mcp: McpClient, history: list[dict], p
         api_key=ANTHROPIC_API_KEY,
         base_url=base_url,
         default_headers={"api-key": ANTHROPIC_API_KEY},
+        max_retries=0,  # Don't retry 429s — we fall back to Gemini instead
     )
 
     trace = []
-    MAX_ITERATIONS = 10
+    MAX_ITERATIONS = 5
     for iteration in range(MAX_ITERATIONS):
         response = client.messages.create(
             model=CLAUDE_MODEL,
@@ -111,6 +114,7 @@ async def _chat_claude(user_message: str, mcp: McpClient, history: list[dict], p
                 logger.info("Claude calling tool: %s", block.name)
                 tool_entry = {"tool": block.name, "input": block.input, "status": "error", "error": "unknown"}
                 result_str = f"Error: tool call did not complete"
+                logger.info("Tool args: %s", json.dumps(block.input, default=str)[:300])
                 try:
                     result = await mcp.call_tool(block.name, block.input)
                     result_str = result if isinstance(result, str) else json.dumps(result)
@@ -169,7 +173,7 @@ async def _chat_gemini(user_message: str, mcp: McpClient, history: list[dict], p
     contents.append(types.Content(role="user", parts=[types.Part(text=user_message)]))
 
     trace = []
-    MAX_ITERATIONS = 10
+    MAX_ITERATIONS = 5
     for iteration in range(MAX_ITERATIONS):
         response = client.models.generate_content(
             model=GEMINI_MODEL, contents=contents, config=config)
@@ -189,6 +193,7 @@ async def _chat_gemini(user_message: str, mcp: McpClient, history: list[dict], p
         for fc in tool_calls:
             logger.info("Gemini calling tool: %s", fc.name)
             tool_entry = {"tool": fc.name, "input": dict(fc.args)}
+            logger.info("Tool args: %s", json.dumps(dict(fc.args), default=str)[:300])
             try:
                 result = await mcp.call_tool(fc.name, dict(fc.args))
                 result_str = result if isinstance(result, str) else json.dumps(result)
@@ -216,6 +221,14 @@ async def chat(user_message: str, mcp: McpClient, history: list[dict] | None = N
     h = history or []
     if ANTHROPIC_API_KEY and ANTHROPIC_BASE_URL:
         logger.info("Using Claude (%s)", CLAUDE_MODEL)
-        return await _chat_claude(user_message, mcp, h, pod=pod)
+        try:
+            return await _chat_claude(user_message, mcp, h, pod=pod)
+        except anthropic.RateLimitError:
+            logger.warning("Claude rate-limited — falling back to Gemini (%s)", GEMINI_MODEL)
+            if GEMINI_API_KEY:
+                result, trace = await _chat_gemini(user_message, mcp, h, pod=pod)
+                trace.insert(0, {"note": "⚠️ Claude rate-limited — response from Gemini fallback"})
+                return result, trace
+            raise  # No fallback available, let it bubble up
     logger.info("Using Gemini (%s)", GEMINI_MODEL)
     return await _chat_gemini(user_message, mcp, h, pod=pod)

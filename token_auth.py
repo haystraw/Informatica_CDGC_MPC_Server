@@ -4,7 +4,7 @@ Token encryption/decryption for IDMC MCP Server.
 Tokens are Fernet-encrypted blobs containing pod, username, and password.
 The encryption key comes from the ENCRYPTION_KEY environment variable.
 """
-VERSION = "20260529"
+VERSION = "20260529.1"
 
 import base64
 import json

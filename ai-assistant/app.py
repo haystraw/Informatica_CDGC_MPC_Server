@@ -4,19 +4,27 @@ AI Assistant — FastAPI app.
 Routes:
   GET  /              → redirect to /ui
   GET  /ui            → web chat UI (token gate)
-  POST /chat          → chat API (requires X-IDMC-Token header or cookie)
+  POST /connect       → validate token, set httpOnly cookie, return org info
+  POST /chat          → chat API (reads httpOnly cookie server-side)
+  POST /disconnect    → clear cookie
   GET  /health        → health check
+
+Token security:
+  The raw IDMC token is re-encrypted server-side using ENCRYPTION_KEY before
+  being stored in an httpOnly cookie. JS never has access to the raw token.
+  The cookie blob is only decryptable by this server instance.
 """
-VERSION = "20260529"
+VERSION = "20260529.1"
 
 import logging
 import os
 from pathlib import Path
 
 import httpx
+from cryptography.fernet import Fernet
 
 from fastapi import FastAPI, Request, Cookie
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -27,25 +35,96 @@ from token_auth import decode_token, TokenError
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-8s %(message)s")
 logger = logging.getLogger("ai_assistant")
 
-MCP_SERVER_URL = os.environ.get("MCP_SERVER_URL", "").rstrip("/") + "/mcp"
+MCP_SERVER_URL  = os.environ.get("MCP_SERVER_URL", "").rstrip("/") + "/mcp"
+ENCRYPTION_KEY  = os.environ.get("ENCRYPTION_KEY", "").strip()
+COOKIE_NAME     = "idmc_session"
+COOKIE_MAX_AGE  = 60 * 60 * 24 * 30  # 30 days
 
 app = FastAPI(title="IDMC AI Assistant")
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 
 
 # ---------------------------------------------------------------------------
-# Token resolution — header takes priority, then cookie
+# Cookie encryption helpers
 # ---------------------------------------------------------------------------
 
-def _resolve_token(request: Request, cookie_token: str | None) -> str | None:
-    token = request.headers.get("X-IDMC-Token", "").strip()
-    if not token and cookie_token:
-        token = cookie_token.strip()
-    return token or None
+def _fernet() -> Fernet:
+    if not ENCRYPTION_KEY:
+        raise RuntimeError("ENCRYPTION_KEY is not set")
+    return Fernet(ENCRYPTION_KEY.encode())
+
+def _encrypt_for_cookie(token: str) -> str:
+    return _fernet().encrypt(token.encode()).decode()
+
+def _decrypt_from_cookie(blob: str) -> str:
+    return _fernet().decrypt(blob.encode()).decode()
 
 
 # ---------------------------------------------------------------------------
-# Chat API
+# Connect — validate token, re-encrypt, set httpOnly cookie
+# ---------------------------------------------------------------------------
+
+@app.post("/connect")
+async def connect(request: Request):
+    body = await request.json()
+    token = body.get("token", "").strip()
+    if not token:
+        return JSONResponse({"error": "No token provided"}, status_code=400)
+
+    try:
+        creds = decode_token(token)
+    except TokenError as e:
+        return JSONResponse({"error": str(e)}, status_code=401)
+
+    pod      = creds.get("pod", "")
+    username = creds.get("username", "")
+
+    # Fetch org name from IDMC
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                f"https://{pod}.informaticacloud.com/identity-service/api/v1/Login",
+                json={"username": username, "password": creds.get("password", "")},
+                headers={"Content-Type": "application/json"},
+            )
+        org_name = pod
+        if resp.status_code == 200:
+            data = resp.json()
+            org_name = data.get("orgName") or data.get("currentOrgName") or pod
+    except Exception:
+        org_name = pod
+
+    # Re-encrypt token for cookie storage
+    try:
+        cookie_blob = _encrypt_for_cookie(token)
+    except Exception as e:
+        return JSONResponse({"error": f"Server config error: {e}"}, status_code=500)
+
+    response = JSONResponse({"org_name": org_name, "pod": pod, "username": username})
+    response.set_cookie(
+        key=COOKIE_NAME,
+        value=cookie_blob,
+        max_age=COOKIE_MAX_AGE,
+        httponly=True,        # JS cannot read this
+        samesite="lax",
+        secure=False,
+    )
+    return response
+
+
+# ---------------------------------------------------------------------------
+# Disconnect — clear cookie
+# ---------------------------------------------------------------------------
+
+@app.post("/disconnect")
+async def disconnect():
+    response = JSONResponse({"status": "ok"})
+    response.delete_cookie(COOKIE_NAME)
+    return response
+
+
+# ---------------------------------------------------------------------------
+# Chat API — reads httpOnly cookie, decrypts, uses token
 # ---------------------------------------------------------------------------
 
 class ChatRequest(BaseModel):
@@ -58,16 +137,16 @@ class ChatRequest(BaseModel):
 async def chat_endpoint(
     body: ChatRequest,
     request: Request,
-    idmc_token: str | None = Cookie(default=None),
+    idmc_session: str | None = Cookie(default=None),
 ):
-    token = _resolve_token(request, idmc_token)
-    if not token:
-        return JSONResponse({"error": "No token. Please enroll first."}, status_code=401)
+    if not idmc_session:
+        return JSONResponse({"error": "Not connected. Please enter your token."}, status_code=401)
 
     try:
-        decode_token(token)  # validate without hitting Informatica
-    except TokenError as e:
-        return JSONResponse({"error": str(e)}, status_code=401)
+        token = _decrypt_from_cookie(idmc_session)
+        decode_token(token)  # verify it's still a valid IDMC token
+    except Exception as e:
+        return JSONResponse({"error": "Session invalid or expired. Please reconnect."}, status_code=401)
 
     if not MCP_SERVER_URL or MCP_SERVER_URL == "/mcp":
         return JSONResponse({"error": "MCP_SERVER_URL is not configured."}, status_code=500)
@@ -89,47 +168,6 @@ async def chat_endpoint(
 
 
 # ---------------------------------------------------------------------------
-# Token info — decode token and fetch org name from IDMC
-# ---------------------------------------------------------------------------
-
-@app.post("/token-info")
-async def token_info(request: Request):
-    body = await request.json()
-    token = body.get("token", "").strip()
-    if not token:
-        return JSONResponse({"error": "No token provided"}, status_code=400)
-
-    try:
-        creds = decode_token(token)
-    except TokenError as e:
-        return JSONResponse({"error": str(e)}, status_code=401)
-
-    pod      = creds.get("pod", "")
-    username = creds.get("username", "")
-
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(
-                f"https://{pod}.informaticacloud.com/identity-service/api/v1/Login",
-                json={"username": username, "password": creds.get("password", "")},
-                headers={"Content-Type": "application/json"},
-            )
-        if resp.status_code == 200:
-            data = resp.json()
-            org_name = data.get("orgName") or data.get("currentOrgName") or pod
-        else:
-            org_name = pod
-    except Exception:
-        org_name = pod
-
-    return JSONResponse({
-        "username": username,
-        "pod": pod,
-        "org_name": org_name,
-    })
-
-
-# ---------------------------------------------------------------------------
 # Health check
 # ---------------------------------------------------------------------------
 
@@ -139,7 +177,7 @@ async def health():
 
 
 # ---------------------------------------------------------------------------
-# Web UI — served from static/index.html
+# Web UI
 # ---------------------------------------------------------------------------
 
 @app.get("/ui", response_class=HTMLResponse)

@@ -5,7 +5,7 @@ Adds enrollment UI routes directly onto the FastMCP app, then runs it via
 mcp.run() so the MCP task group is properly initialised. Token auth is handled
 via a raw ASGI middleware that never buffers the response stream.
 """
-VERSION = "20260529"
+VERSION = "20260529.1"
 
 import logging
 import os
@@ -92,6 +92,12 @@ class TokenMiddleware:
         if scope["type"] == "http" and scope.get("path", "").startswith("/mcp"):
             headers = dict(scope.get("headers", []))
             token = headers.get(b"x-idmc-token", b"").decode().strip()
+
+            # Also accept standard Bearer token: Authorization: Bearer <token>
+            if not token:
+                auth = headers.get(b"authorization", b"").decode().strip()
+                if auth.lower().startswith("bearer "):
+                    token = auth[7:].strip()
 
             if not token:
                 await Response('{"error": "X-IDMC-Token header is required"}',
@@ -199,6 +205,7 @@ def _credentials_form(verified_password: str, error: str = "", pod: str = "") ->
 
 def _results_page(token: str, pod: str, server_url: str) -> str:
     mcp_url = f"{server_url}/mcp"
+    host = server_url.rstrip("/")   # e.g. https://idmc-mcp-server-...run.app
 
     claude_code_config = textwrap.dedent(f"""\
         {{
@@ -226,6 +233,18 @@ def _results_page(token: str, pod: str, server_url: str) -> str:
           }}
         }}""")
 
+    databricks_sql = textwrap.dedent(f"""\
+        -- Pre-step: grant permission if needed
+        GRANT CREATE CONNECTION ON METASTORE TO <your_user_or_group>;
+
+        -- Step 1: Create the HTTP connection
+        CREATE CONNECTION idmc TYPE HTTP OPTIONS (
+          host '{host}',
+          port '443',
+          base_path '/mcp',
+          bearer_token '{token}'
+        );""")
+
     return _page(f"""
       <div class="result">
         <h2>Your Token</h2>
@@ -241,9 +260,26 @@ def _results_page(token: str, pod: str, server_url: str) -> str:
            (Windows) or <code>~/Library/Application Support/Claude/claude_desktop_config.json</code> (macOS):</p>
         <textarea readonly onclick="this.select()" style="height:180px">{claude_desktop_config}</textarea>
 
+        <h2>Databricks Genie Code</h2>
+        <p><strong>Pre-step:</strong> Ensure you have permission to create connections, then run this SQL:</p>
+        <textarea readonly onclick="this.select()" style="height:160px">{databricks_sql}</textarea>
+
+        <p style="margin-top:12px"><strong>Step 2 — Mark as MCP connection:</strong><br>
+        If created via SQL, go to <em>AI Gateway &gt; MCPs</em> in the Databricks UI and verify it appears there.<br>
+        If created via the Catalog UI, check the <strong>"Is MCP connection"</strong> checkbox during setup.</p>
+
+        <p style="margin-top:12px"><strong>Step 3 — Add to Genie Code:</strong></p>
+        <ol style="margin-left:20px; font-size:0.9rem; line-height:1.8">
+          <li>Open a Genie Code panel and click the <strong>⚙ Settings</strong> icon (top of panel)</li>
+          <li>Under <em>MCP Servers</em>, click <strong>+ Add Server</strong></li>
+          <li>Select <strong>External MCP server</strong></li>
+          <li>Choose your <code>idmc</code> connection from the list</li>
+          <li>Click <strong>Save</strong></li>
+        </ol>
+
         <h2>Any other MCP client</h2>
         <p>URL: <code>{mcp_url}</code><br>
-           Header: <code>X-IDMC-Token: {token}</code></p>
+           Header: <code>X-IDMC-Token: {token}</code> or <code>Authorization: Bearer {token}</code></p>
       </div>""")
 
 
